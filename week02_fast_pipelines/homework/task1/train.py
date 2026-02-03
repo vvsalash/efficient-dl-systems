@@ -6,6 +6,8 @@ from unet import Unet
 
 from dataset import get_train_data
 
+import argparse
+
 class Scaler:
     def __init__(
         self,
@@ -134,3 +136,14 @@ def train(dynamic_mode: bool = True):
     num_epochs = 5
     for _ in range(0, num_epochs):
         train_epoch(train_loader, model, criterion, optimizer, scaler, device=device)
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["static", "dynamic"], default="dynamic")
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    train(dynamic_mode=(args.mode == "dynamic"))
