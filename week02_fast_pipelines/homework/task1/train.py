@@ -131,7 +131,7 @@ def train(dynamic_mode: bool = True):
 
     train_loader = get_train_data()
 
-    scaler = Scaler(dynamic_mode)
+    scaler = Scaler(dynamic_mode=dynamic_mode)
 
     num_epochs = 5
     for _ in range(0, num_epochs):
