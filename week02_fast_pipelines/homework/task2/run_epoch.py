@@ -34,6 +34,16 @@ from dataset import (
 from transformer import PositionalEncoding, generate_square_subsequent_mask
 
 
+ALL_TASKS = [
+    "brain",
+    "big_brain",
+    "ultra_big_brain",
+    "ultra_duper_basic",
+    "ultra_duper_ffd",
+    "ultra_duper_obfd",
+]
+
+
 @dataclass
 class BenchRow:
     mode: str
@@ -94,6 +104,7 @@ def _warmup_gpu():
         torch.cuda.synchronize()
 
 
+@torch.no_grad()
 def _bench_loader(
     model: GPT2,
     data_loader: DataLoader,
@@ -104,7 +115,7 @@ def _bench_loader(
     packed: bool,
     desc: str,
 ):
-    model.train()
+    model.eval()
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
 
@@ -112,6 +123,10 @@ def _bench_loader(
     batches_seen = 0
 
     total = max_batches if max_batches is not None else None
+
+    def sync():
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device=device)
 
     for batch in tqdm(
         data_loader,
@@ -136,25 +151,21 @@ def _bench_loader(
         
 
         if batches_seen < warmup_steps:
-            with torch.no_grad():
-                logits = model(input_ids, tgt_mask=tgt_mask)
-                targets_t = targets.t().contiguous()
-                _ = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
-            batches_seen += 1
-            continue
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        
-        t0 = time.perf_counter()
-
-        with torch.no_grad():
             logits = model(input_ids, tgt_mask=tgt_mask)
             targets_t = targets.t().contiguous()
             _ = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
+            batches_seen += 1
+            continue
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        sync()
+        
+        t0 = time.perf_counter()
+
+        logits = model(input_ids, tgt_mask=tgt_mask)
+        targets_t = targets.t().contiguous()
+        _ = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
+
+        sync()
         
         t1 = time.perf_counter()
 
@@ -178,7 +189,9 @@ def run_all(
     batch_size: int,
     device: torch.device,
     warmup_steps: int,
-    max_batches: Optional[int]
+    max_batches: Optional[int],
+    only: set[str],
+    out_path: str,
 ) -> None:
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
@@ -236,50 +249,59 @@ def run_all(
             )
         )
     
-    dataset = BrainDataset(corpus)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        collate_fn=lambda batch: collate_fn(batch, max_length=MAX_LENGTH, pad_id=dataset.pad_id),
-    )
-    add_row("BRAIN", "max_length=640", packed=False, loader=loader, n_samples=len(dataset))
-
-
-    dataset = BigBrainDataset(corpus)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        collate_fn=lambda batch: collate_fn(batch, max_length=None, pad_id=dataset.pad_id),
-    )
-    add_row("BIG_BRAIN", "pad_to_batch_max", packed=False, loader=loader, n_samples=len(dataset))
-
-
-    dataset = UltraBigBrainDataset(corpus)
-    for k in [1, 5, 10, 20, 50, 640]:
-        batch_sampler = UltraBigBrainBatchSampler(
-            dataset=dataset,
-            batch_size=batch_size,
-            k=k,
-            shuffle=True,
-            drop_last=False,
-        )
+    if "brain" in only:
+        dataset = BrainDataset(corpus)
         loader = DataLoader(
             dataset,
-            batch_sampler=batch_sampler,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=2,
+            pin_memory=True,
+            collate_fn=lambda batch: collate_fn(batch, max_length=MAX_LENGTH, pad_id=dataset.pad_id),
+        )
+        add_row("BRAIN", "max_length=640", packed=False, loader=loader, n_samples=len(dataset))
+
+    if "big_brain" in only:
+        dataset = BigBrainDataset(corpus)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
             num_workers=2,
             pin_memory=True,
             collate_fn=lambda batch: collate_fn(batch, max_length=None, pad_id=dataset.pad_id),
         )
-        add_row("ULTRA_BIG_BRAIN", f"k={k}", packed=False, loader=loader, n_samples=len(dataset))
-    
+        add_row("BIG_BRAIN", "pad_to_batch_max", packed=False, loader=loader, n_samples=len(dataset))
 
-    for algo in ["basic", "ffd", "obfd"]:
+
+    if "ultra_big_brain" in only:
+        dataset = UltraBigBrainDataset(corpus)
+        for k in [1, 5, 10, 20, 50, 640]:
+            batch_sampler = UltraBigBrainBatchSampler(
+                dataset=dataset,
+                batch_size=batch_size,
+                k=k,
+                shuffle=True,
+                drop_last=False,
+            )
+            loader = DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                num_workers=2,
+                pin_memory=True,
+                collate_fn=lambda batch: collate_fn(batch, max_length=None, pad_id=dataset.pad_id),
+            )
+            add_row("ULTRA_BIG_BRAIN", f"k={k}", packed=False, loader=loader, n_samples=len(dataset))
+    
+    pack_map = {
+        "ultra_duper_basic": "basic",
+        "ultra_duper_ffd": "ffd",
+        "ultra_duper_obfd": "obfd",
+    }
+
+    for task_name, algo in pack_map.items():
+        if task_name not in only:
+            continue
         dataset = UltraDuperBigBrainDataset(
             corpus,
             algo=algo,
@@ -295,9 +317,21 @@ def run_all(
         add_row("ULTRA_DUPER_BIG_BRAIN", f"algo={algo}", packed=True, loader=loader, n_samples=len(dataset))
 
     df = pd.DataFrame([r.__dict__ for r in rows]).sort_values(["mode", "variant"]).reset_index(drop=True)
-    df.to_csv("benchmark.csv", index=False)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    df.to_csv(out_path, index=False)
     print(df.to_string(index=False))
     return df
+
+
+def _parse_only(s: str) -> set[str]:
+    s = s.strip().lower()
+    if s in ("all", ""):
+        return set(ALL_TASKS)
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    unknown = [p for p in parts if p not in ALL_TASKS]
+    if unknown:
+        raise SystemExit(f"Unknown --only entries: {unknown}. Allowed: {ALL_TASKS} or 'all'")
+    return set(parts)
 
 
 def main():
@@ -307,15 +341,22 @@ def main():
     parser.add_argument("--warmup_steps", type=int, default=10)
     parser.add_argument("--max_batches", type=int, default=200, help="limit measured batches (None = full epoch)")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--only", type=str, default="all", help=f"comma-separated tasks: {ALL_TASKS} or 'all'")
+    parser.add_argument("--out", type=str, default="benchmark.csv", help="where to write results for this process")
     args = parser.parse_args()
 
     device = torch.device(args.device)
+    only = _parse_only(args.only)
+    max_batches = None if args.max_batches == 0 else args.max_batches
+
     run_all(
         data_path=args.data_path,
         batch_size=args.batch_size,
         device=device,
         warmup_steps=args.warmup_steps,
-        max_batches=args.max_batches if args.max_batches > 0 else None,
+        max_batches=max_batches,
+        only=only,
+        out_path=args.out,
     )
 
 
