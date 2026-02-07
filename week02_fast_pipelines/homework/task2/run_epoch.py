@@ -22,6 +22,8 @@ from tqdm.auto import tqdm
 
 from dataset import (
     MAX_LENGTH,
+    build_tokenized_corpus,
+    TokenizedCorpus,
     BrainDataset,
     BigBrainDataset,
     UltraBigBrainDataset,
@@ -43,6 +45,7 @@ class BenchRow:
     mean_ms: float
     median_ms: float
     n_batches: int
+    n_samples: int
 
 
 class GPT2(nn.Module):
@@ -103,10 +106,9 @@ def _bench_loader(
 ):
     model.train()
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
     loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
 
-    times = []
+    times: list[float] = []
     batches_seen = 0
 
     total = max_batches if max_batches is not None else None
@@ -134,12 +136,10 @@ def _bench_loader(
         
 
         if batches_seen < warmup_steps:
-            optimizer.zero_grad(set_to_none=True)
-            logits = model(input_ids, tgt_mask=tgt_mask)
-            targets_t = targets.t().contiguous()
-            loss = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
-            loss.backward()
-            optimizer.step()
+            with torch.no_grad():
+                logits = model(input_ids, tgt_mask=tgt_mask)
+                targets_t = targets.t().contiguous()
+                _ = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
             batches_seen += 1
             continue
 
@@ -148,13 +148,10 @@ def _bench_loader(
         
         t0 = time.perf_counter()
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(input_ids, tgt_mask=tgt_mask)
-
-        targets_t = targets.t().contiguous()
-        loss = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
-        loss.backward()
-        optimizer.step()
+        with torch.no_grad():
+            logits = model(input_ids, tgt_mask=tgt_mask)
+            targets_t = targets.t().contiguous()
+            _ = loss_fn(logits.reshape(-1, logits.size(-1)), targets_t.reshape(-1))
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -167,10 +164,10 @@ def _bench_loader(
         if max_batches is not None and len(times) >= max_batches:
             break
 
-    if len(times) == 0:
+    if not times:
         return None
     
-    arr = np.array(times, dtype=np.float64) * 1000.0
+    arr = np.asarray(times, dtype=np.float64) * 1000.0
     return float(arr.min()), float(arr.max()), float(arr.mean()), float(np.median(arr)), len(times)
 
 
@@ -188,6 +185,12 @@ def run_all(
 
     _warmup_gpu()
 
+    corpus: TokenizedCorpus = build_tokenized_corpus(
+        data_path=data_path,
+        max_length=MAX_LENGTH,
+        skip_long=True,
+    )
+
     rows: list[BenchRow] = []
 
     def add_row(
@@ -195,6 +198,7 @@ def run_all(
         variant: str,
         packed: bool,
         loader: DataLoader,
+        n_samples: int,
     ):
         desc = f"{mode}-{variant}"
         model = GPT2(
@@ -227,11 +231,12 @@ def run_all(
                 max_ms=max_ms,
                 mean_ms=mean_ms,
                 median_ms=median_ms,
-                n_batches=n_batches
+                n_batches=n_batches,
+                n_samples=n_samples,
             )
         )
     
-    dataset = BrainDataset(data_path=data_path, max_length=MAX_LENGTH)
+    dataset = BrainDataset(corpus)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -240,10 +245,10 @@ def run_all(
         pin_memory=True,
         collate_fn=lambda batch: collate_fn(batch, max_length=MAX_LENGTH, pad_id=dataset.pad_id),
     )
-    add_row("BRAIN", "max_length=640", packed=False, loader=loader)
+    add_row("BRAIN", "max_length=640", packed=False, loader=loader, n_samples=len(dataset))
 
 
-    dataset = BigBrainDataset(data_path=data_path, max_length=MAX_LENGTH)
+    dataset = BigBrainDataset(corpus)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -252,14 +257,11 @@ def run_all(
         pin_memory=True,
         collate_fn=lambda batch: collate_fn(batch, max_length=None, pad_id=dataset.pad_id),
     )
-    add_row("BIG_BRAIN", "pad_to_batch_max", packed=False, loader=loader)
+    add_row("BIG_BRAIN", "pad_to_batch_max", packed=False, loader=loader, n_samples=len(dataset))
 
 
+    dataset = UltraBigBrainDataset(corpus)
     for k in [1, 5, 10, 20, 50, 640]:
-        dataset = UltraBigBrainDataset(
-            data_path=data_path,
-            max_length=MAX_LENGTH
-        )
         batch_sampler = UltraBigBrainBatchSampler(
             dataset=dataset,
             batch_size=batch_size,
@@ -274,13 +276,12 @@ def run_all(
             pin_memory=True,
             collate_fn=lambda batch: collate_fn(batch, max_length=None, pad_id=dataset.pad_id),
         )
-        add_row("ULTRA_BIG_BRAIN", f"k={k}", packed=False, loader=loader)
+        add_row("ULTRA_BIG_BRAIN", f"k={k}", packed=False, loader=loader, n_samples=len(dataset))
     
 
     for algo in ["basic", "ffd", "obfd"]:
         dataset = UltraDuperBigBrainDataset(
-            data_path=data_path,
-            max_length=MAX_LENGTH,
+            corpus,
             algo=algo,
         )
         loader = DataLoader(
@@ -291,10 +292,9 @@ def run_all(
             pin_memory=True,
             collate_fn=lambda batch: collate_fn(batch, max_length=None, pad_id=dataset.pad_id),
         )
-        add_row("ULTRA_DUPER_BIG_BRAIN", f"algo={algo}", packed=True, loader=loader)
+        add_row("ULTRA_DUPER_BIG_BRAIN", f"algo={algo}", packed=True, loader=loader, n_samples=len(dataset))
 
-    df = pd.DataFrame([r.__dict__ for r in rows])
-    df = df.sort_values(["mode", "variant"]).reset_index(drop=True)
+    df = pd.DataFrame([r.__dict__ for r in rows]).sort_values(["mode", "variant"]).reset_index(drop=True)
     df.to_csv("benchmark.csv", index=False)
     print(df.to_string(index=False))
     return df

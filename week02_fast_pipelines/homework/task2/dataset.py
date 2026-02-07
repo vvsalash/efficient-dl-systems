@@ -1,5 +1,5 @@
 from typing import Optional
-from collections import defaultdict, deque
+from collections import defaultdict
 import os
 import random
 
@@ -7,6 +7,7 @@ import torch
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import Sampler, IterableDataset
 from transformers import AutoTokenizer
+from dataclasses import dataclass
 
 
 MAX_LENGTH = 640
@@ -23,8 +24,6 @@ def _shift_for_lm(ids: list[int]) -> tuple[list[int], list[int]]:
     """
     Build (input_ids, targets) for next token prediction.
     """
-    if len(ids) < 2:
-        return [], []
     return ids[:-1], ids[1:]
 
 
@@ -35,55 +34,85 @@ def _tokenize_to_ids(tokenizer, text: str) -> list[int]:
     return tokenizer.convert_tokens_to_ids(tokens)
 
 
-class BrainDataset(Dataset):
+@dataclass
+class TokenizedCorpus:
+    token_ids: list[list[int]]
+    pad_id: int
+    max_length: int
+
+
+def build_tokenized_corpus(
+    data_path: str,
+    max_length: int = MAX_LENGTH,
+    skip_long: bool = True,
+    tokenizer_name: str = "bert-base-uncased",
+) -> TokenizedCorpus:
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+    keep: list[list[int]] = []
+    limit = max_length + 1
+
+    for text in _read_text_lines(data_path):
+        ids = _tokenize_to_ids(tokenizer, text)
+        if len(ids) < 2:
+            continue
+
+        if skip_long:
+            if len(ids) > limit:
+                continue
+        else:
+            ids = ids[:limit]
+
+        keep.append(ids)
+
+    return TokenizedCorpus(token_ids=keep, pad_id=pad_id, max_length=max_length)
+
+
+class _BaseDataset(Dataset):
+    def __init__(self, corpus: TokenizedCorpus):
+        self._corpus = corpus
+
+
+    def __len__(self) -> int:
+        return len(self._corpus.token_ids)
+
+
+    @property
+    def pad_id(self) -> int:
+        return self._corpus.pad_id
+
+
+    @property
+    def max_length(self) -> int:
+        return self._corpus.max_length
+
+
+class BrainDataset(_BaseDataset):
     """
     Padding every sample to fixed max_length.
     """
-    def __init__(self, data_path: str, max_length: int = MAX_LENGTH) -> None:
-        self._max_length = max_length
-        self._tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self._pad_id = self._tokenizer.pad_token_id if self._tokenizer.pad_token_id is not None else 0
-
-        self._token_ids: list[list[int]] = []
-        for text in _read_text_lines(data_path):
-            ids = _tokenize_to_ids(self._tokenizer, text)
-            if len(ids) >= 2:
-                self._token_ids.append(ids)
-
-
-    def __len__(self):
-        return len(self._token_ids)
-
-
     def __getitem__(self, idx: int):
-        ids = self._token_ids[idx][:self._max_length + 1]
+        ids = self._corpus.token_ids[idx]
         input_ids, targets = _shift_for_lm(ids)
 
-        pad_size = self._max_length - len(input_ids)
+        pad_size = self.max_length - len(input_ids)
         if pad_size > 0:
-            input_ids = input_ids + [self._pad_id] * pad_size
-            targets = targets + [self._pad_id] * pad_size
+            input_ids = input_ids + [self.pad_id] * pad_size
+            targets = targets + [self.pad_id] * pad_size
         
         return (
             torch.tensor(input_ids, dtype=torch.int64),
             torch.tensor(targets, dtype=torch.int64)
         )
-    
-
-    @property
-    def pad_id(self) -> int:
-        return self._pad_id
 
 
-class BigBrainDataset(BrainDataset):
+class BigBrainDataset(_BaseDataset):
     """
     Padding is applied later in collate_fn up to batch max length.
     """
-    def __init__(self, data_path: str, max_length: int = MAX_LENGTH) -> None:
-        super().__init__(data_path, max_length)
-
     def __getitem__(self, idx: int):
-        ids = self._token_ids[idx][:self._max_length + 1]
+        ids = self._corpus.token_ids[idx]
         input_ids, targets = _shift_for_lm(ids)
         return (
             torch.tensor(input_ids, dtype=torch.int64),
@@ -91,90 +120,51 @@ class BigBrainDataset(BrainDataset):
         )
 
 
-class UltraBigBrainDataset(Dataset):
+class UltraBigBrainDataset(_BaseDataset):
     """
     Stores samples grouped by sequence length to enable efficient bucket-based batching.
     """
-    def __init__(self, data_path: str, max_length: int = MAX_LENGTH) -> None:
-        self._max_length = max_length
-        self._tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self._pad_id = self._tokenizer.pad_token_id if self._tokenizer.pad_token_id is not None else 0
-
-        self._token_ids: list[list[int]] = []
+    def __init__(self, corpus: TokenizedCorpus):
+        super().__init__(corpus)
         self._len2idx: dict[int, list[int]] = defaultdict(list)
-
-        for text in _read_text_lines(data_path):
-            ids = _tokenize_to_ids(self._tokenizer, text)
-            ids = ids[:self._max_length + 1]
-            input_ids, _ = _shift_for_lm(ids)
-            if len(input_ids) == 0:
+        for i, ids in enumerate(self._corpus.token_ids):
+            length = len(ids) - 1
+            if length <= 0:
                 continue
-            idx = len(self._token_ids)
-            self._token_ids.append(ids)
-            self._len2idx[len(input_ids)].append(idx)
-            
+            self._len2idx[length].append(i)
 
-    def __len__(self):
-        return len(self._token_ids)
-    
 
     def __getitem__(self, idx: int):
-        ids = self._token_ids[idx]
+        ids = self._corpus.token_ids[idx]
         input_ids, targets = _shift_for_lm(ids)
         return (
             torch.tensor(input_ids, dtype=torch.int64),
             torch.tensor(targets, dtype=torch.int64)
-        )
-        
-    
-    @property
-    def pad_id(self) -> int:
-        return self._pad_id
-    
+        ) 
+
 
     @property
     def len2idx(self) -> dict[int, list[int]]:
         return self._len2idx
     
 
-    @property
-    def max_length(self) -> int:
-        return self._max_length
-    
-
-
-class UltraDuperBigBrainDataset(Dataset):
+class UltraDuperBigBrainDataset(_BaseDataset):
     """
     Concatenates multiple sequences into fixed-length packed samples and builds attention masks to prevent cross-sequence information leakage.
     Supports basic, FFD and OBFD packing strategies.
     """
-    def __init__(
-        self,
-        data_path: str,
-        max_length: int = MAX_LENGTH,
-        algo: str = "basic",
-    ) -> None:
-        self._max_length = max_length
-        self._packed_length = self._max_length + 1
-        self._tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self._pad_id = self._tokenizer.pad_token_id if self._tokenizer.pad_token_id is not None else 0
+    def __init__(self, corpus: TokenizedCorpus, algo: str = "basic") -> None:
+        super().__init__(corpus)
+        self._packed_length = corpus.max_length + 1
         self._algo = algo.lower()
 
-        sequences: list[list[int]] = []
-        for text in _read_text_lines(data_path):
-            ids = _tokenize_to_ids(self._tokenizer, text)
-            if len(ids) < 2:
-                continue
-            sequences.append(ids)
+        sequences: list[list[int]] = corpus.token_ids
         
         if self._algo == "basic":
-            sequences = [seq[:self._packed_length] for seq in sequences]
             self._packed = self._basic_pack(sequences)
         elif self._algo == "ffd":
-            sequences = [seq for seq in sequences if len(seq) <= self._packed_length]
             self._packed = self._ffd_pack(sequences)
         elif self._algo == "obfd":
-            sequences = [seq for seq in sequences if len(seq) <= self._packed_length]
             self._packed = self._obfd_pack(sequences)
         else:
             raise ValueError(f"Unknown algo={algo}. Use basic, ffd or obfd")
@@ -200,7 +190,7 @@ class UltraDuperBigBrainDataset(Dataset):
         )
 
         targets_ids = targets_ids.clone()
-        targets_ids[is_boundary] = self._pad_id
+        targets_ids[is_boundary] = self.pad_id
 
         attention_mask = self._build_attention_mask(input_segments)
 
@@ -385,11 +375,6 @@ class UltraDuperBigBrainDataset(Dataset):
         return self._materialize_bins(bins)
 
 
-    @property
-    def pad_id(self) -> int:
-        return self._pad_id
-    
-
     def _materialize_bins(self, bins: list[list[list[int]]]) -> list[tuple[torch.Tensor, torch.Tensor]]:
         packed: list[tuple[torch.Tensor, torch.Tensor]] = []
         for seq_list in bins:
@@ -405,7 +390,7 @@ class UltraDuperBigBrainDataset(Dataset):
                 segment_id += 1
             pad_size = self._packed_length - len(tokens)
             if pad_size > 0:
-                tokens.extend([self._pad_id] * pad_size)
+                tokens.extend([self.pad_id] * pad_size)
                 segments.extend([-1] * pad_size)
             packed.append((
                 torch.tensor(tokens, dtype=torch.int64),
