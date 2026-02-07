@@ -4,6 +4,13 @@ from typing import Optional
 import time
 import argparse
 
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import warnings
+warnings.filterwarnings("ignore", message="huggingface/tokenizers")
+warnings.filterwarnings("ignore", message="Token indices sequence length is longer")
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -288,6 +295,7 @@ def run_all(
 
     df = pd.DataFrame([r.__dict__ for r in rows])
     df = df.sort_values(["mode", "variant"]).reset_index(drop=True)
+    df.to_csv("benchmark.csv", index=False)
     print(df.to_string(index=False))
     return df
 
