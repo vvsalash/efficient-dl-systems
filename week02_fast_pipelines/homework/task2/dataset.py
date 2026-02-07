@@ -76,6 +76,9 @@ class BrainDataset(Dataset):
 
 
 class BigBrainDataset(BrainDataset):
+    """
+    Padding is applied later in collate_fn up to batch max length.
+    """
     def __init__(self, data_path: str, max_length: int = MAX_LENGTH) -> None:
         super().__init__(data_path, max_length)
 
@@ -89,6 +92,9 @@ class BigBrainDataset(BrainDataset):
 
 
 class UltraBigBrainDataset(Dataset):
+    """
+    Stores samples grouped by sequence length to enable efficient bucket-based batching.
+    """
     def __init__(self, data_path: str, max_length: int = MAX_LENGTH) -> None:
         self._max_length = max_length
         self._tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
@@ -138,6 +144,10 @@ class UltraBigBrainDataset(Dataset):
 
 
 class UltraDuperBigBrainDataset(Dataset):
+    """
+    Concatenates multiple sequences into fixed-length packed samples and builds attention masks to prevent cross-sequence information leakage.
+    Supports basic, FFD and OBFD packing strategies.
+    """
     def __init__(
         self,
         data_path: str,
@@ -476,6 +486,9 @@ def collate_fn(
 
 
 class UltraBigBrainBatchSampler(Sampler[list[int]]):
+    """
+    Forms batches from samples of similar lengths such that length difference inside a batch is <= k.
+    """
     def __init__(
         self,
         dataset: UltraBigBrainDataset,
