@@ -34,6 +34,12 @@ def get_loaders() -> torch.utils.data.DataLoader:
     val_transforms = dataset.get_val_transforms()
 
     frame = pd.read_csv("clothing-dataset/images.csv")
+    img_dir = "clothing-dataset/images"
+
+    paths = frame["image"].astype(str).apply(lambda x: os.path.join(img_dir, f"{x}.jpg"))
+    exists = paths.apply(os.path.exists)
+    frame = frame[exists].reset_index(drop=True)
+
     train_frame = frame.sample(frac=Settings.train_frac)
     val_frame = frame.drop(train_frame.index)
 
