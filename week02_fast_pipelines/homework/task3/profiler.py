@@ -54,7 +54,7 @@ class Profile:
         self._cuda_zero: Optional[torch.cuda.Event] = None
         self._has_cuda = torch.cuda.is_available()
 
-        self._pid = 0
+        self._pid = os.getpid()
         self._tid_forward = 0
         self._tid_backward = 1
     

@@ -166,96 +166,27 @@ def profile_train_steps(
         print(df.head(15).to_string(index=False))
 
 
-def get_fake_loader(num_batches: int, batch_size: int):
-    for _ in range(num_batches):
-        data = torch.randn(batch_size, 3, 224, 224)
-        label = torch.randint(0, 20, (batch_size,))
-        yield data, label
-
-
-def profile_synth_steps(
-    model,
-    criterion,
-    optimizer,
-    profile_steps: int = 10,
-    schedule: dict | None = None,
-    trace_path: str = "trace_synth.json",
-    table_path: str = "layer_times_synth.csv",
-    batch_size: int = 32,
-) -> None:
-    schedule = schedule or {"wait": 1, "warmup": 1, "active": profile_steps, "repeat": 1}
-
-    model.train()
-    os.makedirs(os.path.dirname(trace_path) or ".", exist_ok=True)
-    os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
-
-    total = schedule["wait"] + schedule["warmup"] + schedule["active"]
-
-    fake_loader = get_fake_loader(num_batches=total, batch_size=batch_size)
-
-    with Profile(model, name="vit", schedule=schedule) as prof:
-        for i, (data, label) in enumerate(tqdm(fake_loader, total=total, desc="ProfileSynth")):
-            prof.step()
-
-            data = data.to(Settings.device, non_blocking=True)
-            label = label.to(Settings.device, non_blocking=True)
-
-            output = model(data)
-            loss = criterion(output, label)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-
-    prof.to_perfetto(trace_path)
-
-    print("spans:", len(prof._spans))
-    print("events:", len(prof.events))
-
-    df = build_layer_table(prof.events)
-    df.to_csv(table_path, index=False)
-
-    if not df.empty:
-        print(df.head(15).to_string(index=False))
-
-
 def main():
     print("cuda available:", torch.cuda.is_available())
     print("device:", Settings.device)
     seed_everything()
     model = get_vit_model()
-    
-
+    train_loader, val_loader = get_loaders()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=Settings.lr)
 
-    profile_synth_steps(
+    # run_epoch(model, train_loader, val_loader, criterion, optimizer)
+
+    profile_train_steps(
         model=model,
+        train_loader=train_loader,
         criterion=criterion,
         optimizer=optimizer,
-        profile_steps=128,
-        schedule={"wait": 1, "warmup": 1, "active": 128, "repeat": 1},
-        trace_path="trace_synth.json",
-        table_path="layer_times_synth.csv",
-        batch_size=32,
+        profile_steps=10,
+        schedule={"wait": 1, "warmup": 1, "active": 10, "repeat": 1},
+        trace_path="trace.json",
+        table_path="layer_times.csv",
     )
-
-    # train_loader, val_loader = get_loaders()
-    # criterion = nn.CrossEntropyLoss()
-    # optimizer = optim.Adam(model.parameters(), lr=Settings.lr)
-
-    # # run_epoch(model, train_loader, val_loader, criterion, optimizer)
-
-    # profile_train_steps(
-    #     model=model,
-    #     train_loader=train_loader,
-    #     criterion=criterion,
-    #     optimizer=optimizer,
-    #     profile_steps=10,
-    #     schedule={"wait": 1, "warmup": 1, "active": 10, "repeat": 1},
-    #     trace_path="trace.json",
-    #     table_path="layer_times.csv",
-    # )
 
 
 
