@@ -33,15 +33,15 @@ def get_loaders() -> torch.utils.data.DataLoader:
     train_transforms = dataset.get_train_transforms()
     val_transforms = dataset.get_val_transforms()
 
-    frame = pd.read_csv(f"{Clothes.directory}/{Clothes.csv_name}")
+    frame = pd.read_csv("clothing-dataset/images.csv")
     train_frame = frame.sample(frac=Settings.train_frac)
     val_frame = frame.drop(train_frame.index)
 
     train_data = dataset.ClothesDataset(
-        f"{Clothes.directory}/{Clothes.train_val_img_dir}", train_frame, transform=train_transforms
+        "clothing-dataset/images", train_frame, transform=train_transforms
     )
     val_data = dataset.ClothesDataset(
-        f"{Clothes.directory}/{Clothes.train_val_img_dir}", val_frame, transform=val_transforms
+        "clothing-dataset/images", val_frame, transform=val_transforms,
     )
 
     print(f"Train Data: {len(train_data)}")
