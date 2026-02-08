@@ -9,6 +9,9 @@ import pandas as pd
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import os
+from profiler import Profile
+
 from utils import Settings, Clothes, seed_everything
 from vit import ViT
 
@@ -50,6 +53,40 @@ def get_loaders() -> torch.utils.data.DataLoader:
     return train_loader, val_loader
 
 
+def build_layer_table(events: list[dict]) -> pd.DataFrame:
+    rows = []
+    for event in events:
+        args = event.get("args", {})
+        rows.append(
+            {
+                "name": event.get("name", ""),
+                "kind": args.get("kind", ""),
+                "phase": args.get("phase", ""),
+                "step": args.get("step", -1),
+                "dur_us": float(event.get("dur", 0.0)),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    df = df[df["phase"] == "active"].copy()
+
+    agg = (
+        df.groupby(["name", "kind"], as_index=False)
+        .agg(
+            total_us=("dur_us", "sum"),
+            mean_us=("dur_us", "mean"),
+            p50_us=("dur_us", "median"),
+            max_us=("dur_us", "max"),
+            count=("dur_us", "count"),
+        )
+        .sort_values("total_us", ascending=False)
+    )
+    return agg
+
+
 def run_epoch(model, train_loader, val_loader, criterion, optimizer) -> tp.Tuple[float, float]:
     epoch_loss, epoch_accuracy = 0, 0
     val_loss, val_accuracy = 0, 0
@@ -79,6 +116,48 @@ def run_epoch(model, train_loader, val_loader, criterion, optimizer) -> tp.Tuple
     return epoch_loss, epoch_accuracy, val_loss, val_accuracy
 
 
+def profile_train_steps(
+    model,
+    train_loader,
+    criterion,
+    optimizer,
+    profile_steps: int = 10,
+    schedule: dict | None = None,
+    trace_path: str = "trace.json",
+    table_path: str = "layer_times.csv",
+) -> None:
+    schedule = schedule or {"wait": 1, "warmup": 1, "active": profile_steps, "repeat": 1}
+
+    model.train()
+    os.makedirs(os.path.dirname(trace_path) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
+
+    with Profile(model, name="vit", schedule=schedule) as prof:
+        for i, (data, label) in enumerate(tqdm(train_loader, desc="ProfileTrain")):
+            data = data.to(Settings.device)
+            label = label.to(Settings.device)
+
+            output = model(data)
+            loss = criterion(output, label)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+            prof.step()
+
+            if i + 1 >= (schedule["wait"] + schedule["warmup"] + schedule["active"]):
+                break
+
+    prof.to_perfetto(trace_path)
+
+    df = build_layer_table(prof.events)
+    df.to_csv(table_path, index=False)
+
+    if not df.empty:
+        print(df.head(15).to_string(index=False))
+
+
 def main():
     seed_everything()
     model = get_vit_model()
@@ -86,7 +165,19 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=Settings.lr)
 
-    run_epoch(model, train_loader, val_loader, criterion, optimizer)
+    # run_epoch(model, train_loader, val_loader, criterion, optimizer)
+
+    profile_train_steps(
+        model=model,
+        train_loader=train_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        profile_steps=10,
+        schedule={"wait": 1, "warmup": 1, "active": 10, "repeat": 1},
+        trace_path="trace.json",
+        table_path="layer_times.csv",
+    )
+
 
 
 if __name__ == "__main__":
