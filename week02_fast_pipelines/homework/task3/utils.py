@@ -31,8 +31,8 @@ class Settings:
 
 
 class Clothes:
-    directory = "data"
-    train_val_img_dir = "train"
+    directory = "clothing-dataset"
+    train_val_img_dir = "images"
     csv_name = "images.csv"
     archive_name = "images_original"
 
