@@ -101,7 +101,7 @@ class Profile:
                 full_name = name
 
             if self._is_leaf(module):
-                name_map[module] = module.__class__.__name__
+                name_map[module] = f"{full_name}: {module.__class__.__name__}"
             else:
                 name_map[module] = f"{full_name}: {module.__class__.__name__}"
 
