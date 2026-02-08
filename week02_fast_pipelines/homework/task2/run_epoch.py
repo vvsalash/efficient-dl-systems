@@ -126,7 +126,7 @@ def _bench_loader(
 
     def sync():
         if torch.cuda.is_available():
-            torch.cuda.synchronize(device=device)
+            torch.cuda.synchronize()
 
     for batch in tqdm(
         data_loader,
