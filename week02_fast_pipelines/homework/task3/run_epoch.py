@@ -140,6 +140,7 @@ def profile_train_steps(
 
     with Profile(model, name="vit", schedule=schedule) as prof:
         for i, (data, label) in enumerate(tqdm(train_loader, desc="ProfileTrain")):
+            prof.step()
             data = data.to(Settings.device)
             label = label.to(Settings.device)
 
@@ -150,12 +151,13 @@ def profile_train_steps(
             loss.backward()
             optimizer.step()
 
-            prof.step()
-
             if i + 1 >= (schedule["wait"] + schedule["warmup"] + schedule["active"]):
                 break
 
     prof.to_perfetto(trace_path)
+
+    print("spans:", len(prof._spans))
+    print("events:", len(prof.events))
 
     df = build_layer_table(prof.events)
     df.to_csv(table_path, index=False)
@@ -165,6 +167,8 @@ def profile_train_steps(
 
 
 def main():
+    print("cuda available:", torch.cuda.is_available())
+    print("device:", Settings.device)
     seed_everything()
     model = get_vit_model()
     train_loader, val_loader = get_loaders()
