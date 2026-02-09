@@ -1,5 +1,5 @@
 import os
-
+import torch
 import torch.distributed as dist
 
 
@@ -24,8 +24,31 @@ def run_sequential(rank, size, num_iter=10):
     Process 0
     ```
     """
+    token = torch.empty(0)
 
-    pass
+    for _ in range(num_iter):
+        if rank == 0:
+            print(f"Process {rank}")
+            if size > 1:
+                dist.send(token, dst=1)
+        else:
+            dist.recv(token, src=rank - 1)
+            print(f"Process {rank}")
+            if rank != size - 1:
+                dist.send(token, dst=rank + 1)
+        
+        if rank == size - 1:
+            print(f"Process {rank}")
+            if size > 1:
+                dist.send(token, dst=size - 2)
+        else:
+            dist.recv(token, src=rank + 1)
+            print(f"Process {rank}")
+            if rank != 0:
+                dist.send(token, dst=rank - 1)
+        
+        if rank == 0:
+            print("---")
 
 
 if __name__ == "__main__":
