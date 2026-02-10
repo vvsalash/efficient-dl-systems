@@ -19,7 +19,10 @@ def init_process(local_rank, fn, backend="nccl"):
     """Initialize the distributed environment."""
     dist.init_process_group(backend, rank=local_rank)
     size = dist.get_world_size()
-    fn(local_rank, size)
+    try:
+        fn(local_rank, size)
+    finally:
+        dist.destroy_process_group()
 
 
 class Net(nn.Module):
