@@ -36,7 +36,7 @@ def _worker_fn(rank, world_size, port, x_rank, hid_dim, batch_size, q):
     
     loss.backward()
 
-    q.put((rank, y_rank.detach().cpu(), x_rank.grad.detach().cpu()))
+    q.put((rank, y_rank.detach().cpu().numpy(), x_rank.grad.detach().cpu().numpy()))
 
     dist.destroy_process_group()
 
@@ -78,8 +78,8 @@ def test_batchnorm(num_workers, hid_dim, batch_size):
 
     for _ in range(num_workers):
         rank, y_rank, dx_rank = q.get()
-        outputs[rank] = y_rank
-        grads[rank] = dx_rank
+        outputs[rank] = torch.from_numpy(y_rank)
+        grads[rank] = torch.from_numpy(dx_rank)
     
     for p in processes:
         p.join()
