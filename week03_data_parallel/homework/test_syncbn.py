@@ -30,9 +30,9 @@ def _worker_fn(rank, world_size, port, x_rank, hid_dim, batch_size, q):
     left = max(start, 0)
     right = min(end, half_batch)
 
-    loss = y_rank.new_tensor(0.0)
+    loss = y_rank.sum() * 0.0
     if left < right:
-        loss = y_rank[(left - start):(right - start)].sum()
+        loss = loss + y_rank[(left - start):(right - start)].sum()
     
     loss.backward()
 
