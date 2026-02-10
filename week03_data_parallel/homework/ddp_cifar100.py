@@ -84,7 +84,11 @@ def distributed_mean_scalar(x: torch.Tensor):
 def run_training(rank, size, args):
     torch.manual_seed(0)
 
-    device = torch.device(args.device)
+    if args.device == "cuda":
+        torch.cuda.set_device(rank)
+        device = torch.device("cuda", rank)
+    else:
+        device = torch.device("cpu")
     is_rank0 = (rank == 0)
 
     dataset = CIFAR100(
