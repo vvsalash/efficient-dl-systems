@@ -11,7 +11,18 @@ def init_process_group(backend: str):
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local = int(os.environ.get("LOCAL_RANK", rank))
-    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+
+    if backend == "nccl":
+        torch.cuda.set_device(local)
+        dist.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device("cuda", local),
+        )
+    else:
+        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+
     return rank, world_size, local
 
 

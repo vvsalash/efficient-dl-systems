@@ -248,7 +248,7 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--lr", type=float, default=0.01)
     p.add_argument("--grad_accum_steps", type=int, default=2)
-    p.add_argument("--log_every", type=int, default=20)
+    p.add_argument("--log_every", type=int, default=51)
     p.add_argument("--val_frac", type=float, default=0.1)
     args = p.parse_args()
     local_rank = int(os.environ["LOCAL_RANK"])
