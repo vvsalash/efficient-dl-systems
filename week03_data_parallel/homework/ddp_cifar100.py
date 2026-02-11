@@ -6,7 +6,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import CIFAR100
 
@@ -84,6 +84,38 @@ def distributed_mean_scalar(x: torch.Tensor):
     return x
 
 
+def scatter_val_indices(
+    n_items: int,
+    rank: int,
+    world_size: int,
+    device: torch.device
+) -> torch.Tensor:
+    backend = dist.get_backend()
+    cur_device = device if backend == "nccl" else torch.device("cpu")
+
+    base = n_items // world_size
+    remainder = n_items % world_size
+    counts = [base + (1 if r < remainder else 0) for r in range(world_size)]
+
+    offsets = [0]
+    for count in counts[:-1]:
+        offsets.append(offsets[-1] + count)
+    
+    recv = torch.empty((counts[rank],), dtype=torch.int64, device=cur_device)
+
+    if rank == 0:
+        full = torch.arange(n_items, dtype=torch.int64, device=cur_device)
+        scatter_list = [full[offsets[r] : offsets[r] + counts[r]] for r in range(world_size)]
+        dist.scatter(recv, scatter_list=scatter_list, src=0)
+    else:
+        dist.scatter(recv, scatter_list=None, src=0)
+    
+    if device.type == "cuda" and recv.device.type == "cpu":
+        recv = recv.to(device, non_blocking=True)
+
+    return recv
+    
+
 def run_training(rank, size, args):
     torch.manual_seed(0)
 
@@ -123,19 +155,6 @@ def run_training(rank, size, args):
             rank=rank,
             shuffle=True,
             drop_last=True
-        ),
-        num_workers=2,
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        sampler=DistributedSampler(
-            val_ds,
-            num_replicas=size,
-            rank=rank,
-            shuffle=False,
-            drop_last=False
         ),
         num_workers=2,
         pin_memory=True
@@ -214,8 +233,19 @@ def run_training(rank, size, args):
 
         model.eval()
 
-        val_correct = torch.tensor([0.0], device=device)
-        val_total = torch.tensor([0.0], device=device)
+        local_idx = scatter_val_indices(len(val_ds), rank, size, device)
+        local_idx_list = local_idx.cpu().tolist()
+        val_subset = Subset(val_ds, local_idx_list)
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True,
+        )
+
+        val_correct = torch.tensor(0, device=device, dtype=torch.int64)
+        val_total = torch.tensor(0, device=device, dtype=torch.int64)
 
         with torch.no_grad():
             for data, target in val_loader:
@@ -223,12 +253,15 @@ def run_training(rank, size, args):
                 target = target.to(device, non_blocking=True)
                 output = model(data)
                 pred = output.argmax(dim=1)
-                val_correct += (pred == target).float().sum()
-                val_total += torch.tensor([target.numel()], device=device, dtype=torch.float32)
+                val_correct += (pred == target).sum()
+                val_total += target.numel()
+
+        dist.reduce(val_correct, dst=0, op=dist.ReduceOp.SUM)
+        dist.reduce(val_total, dst=0, op=dist.ReduceOp.SUM)
         
-        dist.all_reduce(val_correct, op=dist.ReduceOp.SUM)
-        dist.all_reduce(val_total, op=dist.ReduceOp.SUM)
-        val_acc = (val_correct / val_total).item()
+        val_acc = None
+        if is_rank0:
+            val_acc = (val_correct.float() / val_total.float()).item()
 
         dt = time.time() - t0
         peak_memory = None
