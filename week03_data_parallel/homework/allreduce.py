@@ -271,7 +271,7 @@ def run_one_bench(
             f"[impl={impl:9s}] world={size:2d} numel={numel:6d} "
             f"avg_ms={avg_ms:8.3f} max_ms={max_ms:8.3f} "
             f"rss_mb={rss1:8.1f} (+{(rss1 - rss0):6.1f}) "
-            f"max_abs_err={max_abs_error:.3e}"
+            f"max_abs_error={max_abs_error:.3e}"
         )
 
 
@@ -309,7 +309,7 @@ def main():
     parser.add_argument("--backend", type=str, default="gloo")
     parser.add_argument("--world_size", type=int, default=4)
     parser.add_argument("--numel", type=int, default=10000)
-    parser.add_argument("--iters", type=int, default=50)
+    parser.add_argument("--iters", type=int, default=500)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--dtype", type=str, default="fp32", choices=["fp32", "fp64"])
     parser.add_argument("--check", action="store_true")
