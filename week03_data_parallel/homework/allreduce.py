@@ -168,14 +168,15 @@ def ring_allreduce(send, rank, size):
 
         chunks[recv_idx] += recv_buffer
     
-    reduced_chunk = chunks[rank]
+    owned_idx = (rank - (size - 1)) % size
+    reduced_chunk = chunks[owned_idx]
 
     result_chunks = [None] * size
-    result_chunks[rank] = reduced_chunk
+    result_chunks[owned_idx] = reduced_chunk
 
     for step in range(size - 1):
-        send_idx = (rank - step) % size
-        recv_idx = (rank - step - 1) % size
+        send_idx = (owned_idx - step) % size
+        recv_idx = (owned_idx - step - 1) % size
 
         send_buffer = result_chunks[send_idx]
         recv_buffer = torch.empty(
