@@ -8,24 +8,26 @@ import torch.nn as nn
 
 def rmsnorm_forward(x, weight, eps):
     """Zero-Centered RMSNorm forward."""
-    # TODO: Replace with fused implementation
     input_dtype = x.dtype
     x = x.float()
-    x_squared = x * x
-    mean_squared = x_squared.mean(dim=-1, keepdim=True)
-    mean_squared_eps = mean_squared + eps
-    rsqrt = torch.rsqrt(mean_squared_eps)
-    normalized = x * rsqrt
     scale = 1.0 + weight.float()
-    output = normalized * scale
-    # TODO: Think about additional return parameters
-    return output.to(input_dtype)
+    rms_inv = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
+    output = x * rms_inv * scale
+    return output.to(input_dtype), rms_inv
 
 
-def rmsnorm_backward(grad_output,):
+def rmsnorm_backward(grad_output, x, weight, rms_inv):
     """Zero-Centered RMSNorm backward."""
-    # TODO: Implement backward pass
-    raise NotImplementedError("TODO: Implement backward pass")
+    x = x.float()
+    grad_output = grad_output.float()
+    scale = 1.0 + weight.float()
+    grad = grad_output * scale
+
+    gx_mean = (grad * x).mean(dim=-1, keepdim=True)
+    dx = grad * rms_inv - x * (rms_inv ** 3) * gx_mean
+    dweight = (grad_output * (x * rms_inv)).sum(dim=tuple(range(grad_output.ndim - 1)))
+
+    return dx.to(grad_output.dtype), dweight.to(weight.dtype)
 
 
 class RMSNormFunction(torch.autograd.Function):
@@ -35,19 +37,16 @@ class RMSNormFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, eps):
-        # TODO: Replace with fused implementation
-        output = rmsnorm_forward(x, weight, eps)
-
-        # TODO: Save tensors for backward (make it memory-efficient)
-        ctx.save_for_backward()  # TODO: Fill this
-
+        output, rms_inv = rmsnorm_forward(x, weight, eps)
+        ctx.eps = eps
+        ctx.save_for_backward(x, weight, rms_inv)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        # TODO: Implement fused backward pass
-        # TODO: Make it work with memory-efficient forward
-        raise NotImplementedError("TODO: Implement backward pass")
+        x, weight, rms_inv = ctx.saved_tensors
+        dx, dweight = rmsnorm_backward(grad_output, x, weight, rms_inv)
+        return dx, dweight, None
 
 
 class RMSNorm(nn.Module):
