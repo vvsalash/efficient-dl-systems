@@ -88,7 +88,7 @@ class EfficientTransformer(nn.Module):
 
         # Training path: fused linear + CE
         if labels is not None:
-            return self.loss_fn() # TODO: Fill this
+            return self.loss_fn(x, self.lm_head.weight, labels)
 
         # Inference path
         logits = self.lm_head(x)
