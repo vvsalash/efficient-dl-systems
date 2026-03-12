@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 
+@torch.compile(fullgraph=True)
 def rmsnorm_forward(x, weight, eps):
     """Zero-Centered RMSNorm forward."""
     input_dtype = x.dtype
@@ -16,6 +17,7 @@ def rmsnorm_forward(x, weight, eps):
     return output.to(input_dtype), rms_inv
 
 
+@torch.compile(fullgraph=True)
 def rmsnorm_backward(grad_output, x, weight, rms_inv):
     """Zero-Centered RMSNorm backward."""
     x = x.float()
