@@ -17,14 +17,23 @@ import os
 import time
 import argparse
 from contextlib import nullcontext
+from functools import partial
 
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
+
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    ShardingStrategy,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 from config import TransformerConfig
 from efficient_model import EfficientTransformer
+from efficient_model.transformer import TransformerBlock
 from efficient_optimizer.ademamix import AdEMAMix
 
 
@@ -76,6 +85,31 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def build_fsdp_model(model: torch.nn.Module, local_rank: int, use_amp: bool) -> torch.nn.Module:
+    mp_policy = MixedPrecision(
+        param_dtype=torch.bfloat16 if use_amp else torch.float32,
+        reduce_dtype=torch.bfloat16 if use_amp else torch.float32,
+        buffer_dtype=torch.bfloat16 if use_amp else torch.float32,
+    )
+
+    auto_wrap_policy = partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={TransformerBlock},
+    )
+
+    model = FSDP(
+        model,
+        auto_wrap_policy=auto_wrap_policy,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        mixed_precision=mp_policy,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        forward_prefetch=True,
+        use_orig_params=True,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
+    return model
+
+
 def get_lr(step: int, warmup_steps: int, max_lr: float, total_steps: int) -> float:
     """Linear warmup followed by cosine decay."""
     if step < warmup_steps:
@@ -104,9 +138,8 @@ def train(args):
 
     model = EfficientTransformer(config).to(device)
 
-    # TODO: Replace DDP with FSDP
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+        model = build_fsdp_model(model, local_rank, args.use_amp)
 
     num_params = sum(p.numel() for p in model.parameters())
     if is_master:
@@ -173,7 +206,7 @@ def train(args):
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             with autocast_ctx:
                 loss = model(input_ids, labels=labels)
@@ -182,7 +215,10 @@ def train(args):
 
             if args.grad_clip > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                if world_size > 1:
+                    model.clip_grad_norm_(args.grad_clip)
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
             scaler.step(optimizer)
             scaler.update()
