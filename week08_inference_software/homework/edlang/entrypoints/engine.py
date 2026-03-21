@@ -47,6 +47,19 @@ class InferenceEngine:
             device_map=self.model_config.device,
         )
         self.model.eval()
+    
+    def _should_finish_on_token(self, token_id: int, request: Request) -> bool:
+        sampling_params = request.sampling_params or {}
+        ignore_eos = sampling_params.get("ignore_eos_token", False)
+        eos_token_id = sampling_params.get("eos_token_id", self.tokenizer.eos_token_id)
+
+        if ignore_eos:
+            return False
+
+        if eos_token_id is None:
+            return False
+
+        return token_id == eos_token_id
 
     @torch.no_grad()
     def prefill(self, requests: List[Request]) -> BatchResult:
@@ -65,15 +78,61 @@ class InferenceEngine:
         if not requests:
             return BatchResult(request_ids=[], new_tokens=[], finished=[])
 
-        # TODO: Tokenize prompts and create batch (use self.tokenizer with padding=True)
-        # TODO: Forward pass through model
-        # TODO: For each request:
-        #   - Get real prompt length from attention_mask
-        #   - Generate next token (greedy: argmax from logits[i, real_prompt_len - 1, :])
-        #   - Get past_key_values for the request with self._get_past_for_request
-        #   - Save state: current_len, input_ids (real part only), attention_mask, past_key_values
-        #   - Set generated_tokens, num_generated, is_finished
-        raise NotImplementedError("TODO: Implement prefill method")
+        device = next(self.model.parameters()).device
+        prompts = [request.prompt for request in requests]
+
+        encoded = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.model_config.max_prompt_length,
+        )
+
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+        )
+
+        batch_request_ids = []
+        batch_new_tokens = []
+        batch_finished = []
+
+        for i, request in enumerate(requests):
+            real_prompt_len = int(attention_mask[i].sum().item())
+
+            next_token_logits = outputs.logits[i, real_prompt_len - 1, :]
+            next_token = self._sample(next_token_logits, request)
+
+            request.input_ids = input_ids[i:i + 1, :real_prompt_len].detach().clone()
+            request.attention_mask = attention_mask[i:i + 1, :real_prompt_len].detach().clone()
+            request.current_len = real_prompt_len
+            request.past_key_values = self._get_past_for_request(
+                outputs.past_key_values,
+                i,
+                real_seq_len=real_prompt_len,
+            )
+
+            request.generated_tokens = [next_token]
+            request.num_generated = 1
+            request.is_finished = (
+                request.num_generated >= request.max_new_tokens
+                or self._should_finish_on_token(next_token, request)
+            )
+
+            batch_request_ids.append(request.request_id)
+            batch_new_tokens.append([next_token])
+            batch_finished.append(request.is_finished)
+
+        return BatchResult(
+            request_ids=batch_request_ids,
+            new_tokens=batch_new_tokens,
+            finished=batch_finished,
+        )
 
     @torch.no_grad()
     def decode(self, requests: List[Request]) -> BatchResult:
@@ -91,14 +150,99 @@ class InferenceEngine:
         
         Note: Use RIGHT padding for KV cache. Handle finished requests separately.
         """
-        # TODO: Filter active requests (if none, return empty results for all)
-        # TODO: Prepare batched KV cache using _prepare_past_key_values_batch
-        # TODO: Create batch from last generated tokens [batch_size, 1]
-        # TODO: Build attention_mask for each active request
-        # TODO: Forward pass with past_key_values
-        # TODO: Get next tokens (greedy: argmax from last logit)
-        # TODO: Update each request state (generated_tokens, num_generated, past_key_values, etc.)
-        raise NotImplementedError("TODO: Implement decode method")
+        if not requests:
+            return BatchResult(request_ids=[], new_tokens=[], finished=[])
+        
+        active_requests = [request for request in requests if not request.is_finished]
+
+        if not active_requests:
+            return BatchResult(
+                request_ids=[request.request_id for request in requests],
+                new_tokens=[[] for _ in requests],
+                finished=[True for _ in requests],
+            )
+        
+        device = next(self.model.parameters()).device
+        past_key_values = self._prepare_past_key_values_batch(active_requests)
+
+        input_ids = torch.tensor(
+            [[request.generated_tokens[-1]] for request in active_requests],
+            dtype=torch.long,
+            device=device,
+        )
+
+        max_past_len = max(request.current_len for request in active_requests)
+
+        attention_mask = torch.zeros(
+            (len(active_requests), max_past_len + 1),
+            dtype=torch.long,
+            device=device,
+        )
+
+        for i, request in enumerate(active_requests):
+            attention_mask[i, :request.current_len + 1] = 1
+
+        cache_position = torch.tensor(
+            [request.current_len for request in active_requests],
+            dtype=torch.long,
+            device=device,
+        )
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+            cache_position=cache_position,
+        )
+
+        active_results = {}
+        for i, request in enumerate(active_requests):
+            next_token_logits = outputs.logits[i, -1, :]
+            next_token = self._sample(next_token_logits, request)
+
+            request.generated_tokens.append(next_token)
+            request.num_generated += 1
+            request.current_len += 1
+            request.past_key_values = self._get_past_for_request(
+                outputs.past_key_values,
+                i,
+                real_seq_len=request.current_len,
+            )
+
+            one = torch.ones(
+                (1, 1),
+                dtype=request.attention_mask.dtype,
+                device=request.attention_mask.device,
+            )
+            request.attention_mask = torch.cat([request.attention_mask, one], dim=1)
+
+            request.is_finished = (
+                request.num_generated >= request.max_new_tokens
+                or self._should_finish_on_token(next_token, request)
+            )
+
+            active_results[request.request_id] = ([next_token], request.is_finished)
+
+        request_ids = []
+        new_tokens = []
+        finished = []
+
+        for request in requests:
+            request_ids.append(request.request_id)
+            if request.request_id in active_results:
+                token_list, is_finished = active_results[request.request_id]
+                new_tokens.append(token_list)
+                finished.append(is_finished)
+            else:
+                new_tokens.append([])
+                finished.append(True)
+
+        return BatchResult(
+            request_ids=request_ids,
+            new_tokens=new_tokens,
+            finished=finished,
+        )
 
     def _get_past_for_request(
         self,
@@ -131,12 +275,91 @@ class InferenceEngine:
         if not requests:
             return None
 
-        # TODO: Create new DynamicCache for batch
-        raise NotImplementedError("TODO: Implement _prepare_past_key_values_batch method")
+        max_seq_len = max(request.current_len for request in requests)
+        batch_cache = DynamicCache()
+
+        for layer_idx in range(self.model.config.num_hidden_layers):
+            layer_keys = []
+            layer_values = []
+
+            for request in requests:
+                key = request.past_key_values.key_cache[layer_idx]
+                value = request.past_key_values.value_cache[layer_idx]
+
+                pad_len = max_seq_len - key.shape[2]
+                if pad_len > 0:
+                    key_pad = torch.zeros(
+                        (1, key.shape[1], pad_len, key.shape[3]),
+                        dtype=key.dtype,
+                        device=key.device,
+                    )
+                    value_pad = torch.zeros(
+                        (1, value.shape[1], pad_len, value.shape[3]),
+                        dtype=value.dtype,
+                        device=value.device,
+                    )
+                    key = torch.cat([key, key_pad], dim=2)
+                    value = torch.cat([value, value_pad], dim=2)
+
+                layer_keys.append(key)
+                layer_values.append(value)
+
+            batch_key = torch.cat(layer_keys, dim=0)
+            batch_value = torch.cat(layer_values, dim=0)
+            batch_cache.update(batch_key, batch_value, layer_idx)
+
+        return batch_cache
 
     def _sample(self, tokens_dist: torch.Tensor, request: Request) -> int:
-        # BOUNS PART - Implement sampling logic with sampling_params
-        raise NotImplementedError("I won't do bonus)")
+        sampling_params = request.sampling_params or {}
+        logits = tokens_dist.clone()
+        eos_token_id = sampling_params.get("eos_token_id", self.tokenizer.eos_token_id)
+        ignore_eos = sampling_params.get("ignore_eos_token", False)
+
+        if ignore_eos and eos_token_id is not None and 0 <= eos_token_id < logits.numel():
+            logits[eos_token_id] = float("-inf")
+
+        do_sample = sampling_params.get("do_sample", False)
+        temperature = float(sampling_params.get("temperature", 1.0))
+
+        if not do_sample or temperature <= 0:
+            return int(torch.argmax(logits).item())
+        
+        logits = logits / max(temperature, 1e-5)
+
+        top_k = sampling_params.get("top_k", None)
+        if top_k is not None and 0 < top_k < logits.numel():
+            top_values, _ = torch.topk(logits, top_k)
+            threshold = top_values[-1]
+            logits = torch.where(
+                logits < threshold,
+                torch.full_like(logits, float("-inf")),
+                logits,
+            )
+        
+        top_p = sampling_params.get("top_p", None)
+        if top_p is not None and 0.0 < top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            sorted_probs = torch.softmax(sorted_logits, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+            sorted_mask = cumulative_probs > top_p
+            sorted_mask[1:] = sorted_mask[:-1].clone()
+            sorted_mask[0] = False
+
+            sorted_logits = sorted_logits.masked_fill(sorted_mask, float("-inf"))
+
+            filtered_logits = torch.full_like(logits, float("-inf"))
+            filtered_logits.scatter_(0, sorted_indices, sorted_logits)
+            logits = filtered_logits
+
+        probs = torch.softmax(logits, dim=-1)
+
+        if torch.isnan(probs).any() or probs.sum() <= 0:
+            return int(torch.argmax(tokens_dist).item())
+
+        token = torch.multinomial(probs, num_samples=1)
+        return int(token.item())
 
     def get_generated_text(self, request: Request) -> str:
         if not request.generated_tokens:
