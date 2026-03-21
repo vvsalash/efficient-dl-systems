@@ -7,7 +7,7 @@ import sys
 import os
 
 from edlang.entrypoints.engine import Request, InferenceEngine, BatchResult
-from edlang.managers.metric_manager import MetricManager
+from edlang.managers.metric_manager import MetricManager, METRIC_SHOW_PERIOD
 
 
 @dataclass
@@ -56,11 +56,31 @@ class EDLangScheduler:
         decode_result = None
         prefill_result = None
 
-        # TODO: Implement step method
-        # TODO: First decide how many requests to prefill
-        # TODO: Then do decode
-        # TODO: Update metrics and inner state
-        raise NotImplementedError("Implement step method")
+        if not self.waiting_queue and not self.active_requests:
+            self.metrics_manager.update_waiting_queue_num(0)
+            self.metrics_manager.update_active_requests_num(0)
+            self.metrics_manager.set_no_work()
+            return None
+
+        prefill_batch_size = self._decide_prefill_batch_size()
+
+        if prefill_batch_size > 0 and self.waiting_queue:
+            prefill_result = self._prefill_step()
+        else:
+            decode_result = self._decode_step()
+        
+        self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
+        self.metrics_manager.update_active_requests_num(len(self.active_requests))
+
+        if (
+            self.config.enable_metrics
+            and time.time() - self.metrics_manager.time >= METRIC_SHOW_PERIOD
+        ):
+            stage = "prefill" if prefill_result is not None else "decode"
+            self.metrics_manager.show_metrics(stage)
+            self.metrics_manager.time = time.time()
+        
+        return prefill_result if prefill_result is not None else decode_result
     
     def _decode_step(self):        
         active = [req for req in self.active_requests if not req.is_finished]
@@ -68,15 +88,41 @@ class EDLangScheduler:
         if not active:
             return None
         
-        # TODO: Do decode for all active requests
-        raise NotImplementedError("Implement decode step")
+        start_time = time.time()
+        batch_result = self.engine.decode(active)
+        end_time = time.time()
+
+        self.metrics_manager.record_decode(active, batch_result, start_time, end_time)
+        self.metrics_manager.update_active_requests_num(len(self.active_requests))
+
+        return batch_result
     
     def _prefill_step(self):
         if not self.waiting_queue:
             return None
         
-        # Do prefill for some (which?) number of requests
-        raise NotImplementedError("Implement prefill step")
+        batch_size = min(
+            self._decide_prefill_batch_size(),
+            len(self.waiting_queue),
+            self.config.max_batch_size,
+        )
+
+        if batch_size <= 0:
+            return None
+
+        batch_requests = [self.waiting_queue.popleft() for _ in range(batch_size)]
+
+        start_time = time.time()
+        batch_result = self.engine.prefill(batch_requests)
+        end_time = time.time()
+
+        self.active_requests.extend(batch_requests)
+
+        self.metrics_manager.record_prefill(batch_requests, batch_result, start_time, end_time)
+        self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
+        self.metrics_manager.update_active_requests_num(len(self.active_requests))
+
+        return batch_result
     
     def _decide_prefill_batch_size(self):
         # The most simple policy: prefill only if there are no active requests
