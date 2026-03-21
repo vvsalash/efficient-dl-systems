@@ -49,6 +49,7 @@ class EDLangScheduler:
         self.next_request_id += 1
 
         self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
+        self.metrics_manager.register_request_arrival(request)
         
         return request.request_id
     
@@ -136,6 +137,7 @@ class EDLangScheduler:
     def get_finished_requests(self) -> List[Request]:
         finished = [req for req in self.active_requests if req.is_finished]
         self.active_requests = [req for req in self.active_requests if not req.is_finished]
+        self.metrics_manager.update_active_requests_num(len(self.active_requests))
         return finished
     
     def get_metric_manager(self):
@@ -144,3 +146,5 @@ class EDLangScheduler:
     def clear(self):
         self.waiting_queue = deque()
         self.active_requests = []
+        self.next_request_id = 0
+        self.metrics_manager = MetricManager(enable_metrics=self.config.enable_metrics)

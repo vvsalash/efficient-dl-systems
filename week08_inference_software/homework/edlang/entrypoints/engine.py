@@ -23,6 +23,10 @@ class Request:
     num_generated: int = 0
     is_finished: bool = False
 
+    arrival_time: Optional[float] = None
+    first_token_time: Optional[float] = None
+    finish_time: Optional[float] = None
+
 
 @dataclass
 class BatchResult:
