@@ -12,10 +12,13 @@ from edlang.managers.metric_manager import MetricManager, METRIC_SHOW_PERIOD
 
 @dataclass
 class SchedulerConfig:
-    max_batch_size: int = 8 
+    max_batch_size: int = 8
     max_waiting_requests: int = 100
     prefill_timeout_ms: float = 50.0
     enable_metrics: bool = False
+
+    policy_name: str = "baseline"
+    max_prefill_per_step: int = 4
 
 
 class EDLangScheduler:
@@ -50,9 +53,9 @@ class EDLangScheduler:
 
         self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
         self.metrics_manager.register_request_arrival(request)
-        
+
         return request.request_id
-    
+
     def step(self):
         decode_result = None
         prefill_result = None
@@ -69,7 +72,7 @@ class EDLangScheduler:
             prefill_result = self._prefill_step()
         else:
             decode_result = self._decode_step()
-        
+
         self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
         self.metrics_manager.update_active_requests_num(len(self.active_requests))
 
@@ -80,15 +83,15 @@ class EDLangScheduler:
             stage = "prefill" if prefill_result is not None else "decode"
             self.metrics_manager.show_metrics(stage)
             self.metrics_manager.time = time.time()
-        
+
         return prefill_result if prefill_result is not None else decode_result
-    
-    def _decode_step(self):        
+
+    def _decode_step(self):
         active = [req for req in self.active_requests if not req.is_finished]
-        
+
         if not active:
             return None
-        
+
         start_time = time.time()
         batch_result = self.engine.decode(active)
         end_time = time.time()
@@ -97,11 +100,11 @@ class EDLangScheduler:
         self.metrics_manager.update_active_requests_num(len(self.active_requests))
 
         return batch_result
-    
+
     def _prefill_step(self):
         if not self.waiting_queue:
             return None
-        
+
         batch_size = min(
             self._decide_prefill_batch_size(),
             len(self.waiting_queue),
@@ -124,22 +127,55 @@ class EDLangScheduler:
         self.metrics_manager.update_active_requests_num(len(self.active_requests))
 
         return batch_result
-    
+
     def _decide_prefill_batch_size(self):
-        # The most simple policy: prefill only if there are no active requests
         num_active = len([r for r in self.active_requests if not r.is_finished])
-        
-        if num_active > 0:
+        num_waiting = len(self.waiting_queue)
+
+        if num_waiting == 0:
             return 0
-        else:
+
+        free_slots = max(0, self.config.max_batch_size - num_active)
+        policy = self.config.policy_name
+
+        if policy == "baseline":
+            if num_active > 0:
+                return 0
             return 1
-    
+
+        if policy == "fill_free_slots":
+            if free_slots == 0:
+                return 0
+            return min(num_waiting, free_slots)
+
+        if policy == "capped_aggressive":
+            if free_slots == 0:
+                return 0
+            return min(num_waiting, free_slots, self.config.max_prefill_per_step)
+
+        if policy == "timeout_hybrid":
+            if num_active == 0:
+                return min(num_waiting, self.config.max_batch_size, self.config.max_prefill_per_step)
+
+            oldest_request = self.waiting_queue[0]
+            if oldest_request.arrival_time is None:
+                return 0
+
+            wait_ms = (time.time() - oldest_request.arrival_time) * 1000.0
+
+            if wait_ms >= self.config.prefill_timeout_ms and free_slots > 0:
+                return min(num_waiting, free_slots, self.config.max_prefill_per_step)
+
+            return 0
+
+        return 0
+
     def get_finished_requests(self) -> List[Request]:
         finished = [req for req in self.active_requests if req.is_finished]
         self.active_requests = [req for req in self.active_requests if not req.is_finished]
         self.metrics_manager.update_active_requests_num(len(self.active_requests))
         return finished
-    
+
     def get_metric_manager(self):
         return self.metrics_manager
 

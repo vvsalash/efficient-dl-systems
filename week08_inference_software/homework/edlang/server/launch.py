@@ -18,8 +18,16 @@ def torch_dtype_from_str(s: str) -> torch.dtype:
         raise ValueError(f"Unknown torch_dtype: {s}")
 
 def launch_server(
-    model_name: str, device: str, torch_dtype: torch.dtype, max_prompt_length: int, enable_metrics: bool,
-    max_batch_size: int, max_waiting_requests: int, prefill_timeout_ms: float
+    model_name: str,
+    device: str,
+    torch_dtype: torch.dtype,
+    max_prompt_length: int,
+    enable_metrics: bool,
+    max_batch_size: int,
+    max_waiting_requests: int,
+    prefill_timeout_ms: float,
+    policy_name: str,
+    max_prefill_per_step: int,
 ):
     model_config = ModelConfig(
         model_name=model_name,
@@ -27,13 +35,15 @@ def launch_server(
         torch_dtype=torch_dtype,
         max_prompt_length=max_prompt_length,
     )
-    
+
     engine_config = EngineConfig(model_config=model_config)
     scheduler_config = SchedulerConfig(
         enable_metrics=enable_metrics,
         max_batch_size=max_batch_size,
         max_waiting_requests=max_waiting_requests,
-        prefill_timeout_ms=prefill_timeout_ms
+        prefill_timeout_ms=prefill_timeout_ms,
+        policy_name=policy_name,
+        max_prefill_per_step=max_prefill_per_step,
     )
 
     server = Server(engine_config, scheduler_config)
@@ -50,6 +60,20 @@ if __name__ == "__main__":
     parser.add_argument("--max-waiting-requests", type=int, default=100, help="Maximum waiting requests")
     parser.add_argument("--prefill-timeout-ms", type=float, default=50.0, help="Prefill timeout in milliseconds")
 
+    parser.add_argument(
+        "--policy-name",
+        type=str,
+        default="baseline",
+        choices=["baseline", "fill_free_slots", "capped_aggressive", "timeout_hybrid"],
+        help="Scheduler policy name",
+    )
+    parser.add_argument(
+        "--max-prefill-per-step",
+        type=int,
+        default=4,
+        help="Maximum number of waiting requests to prefill in one step",
+    )
+
     args = parser.parse_args()
 
     torch_dtype = torch_dtype_from_str(args.torch_dtype)
@@ -62,5 +86,7 @@ if __name__ == "__main__":
         enable_metrics=args.enable_metrics,
         max_batch_size=args.max_batch_size,
         max_waiting_requests=args.max_waiting_requests,
-        prefill_timeout_ms=args.prefill_timeout_ms
-    )    
+        prefill_timeout_ms=args.prefill_timeout_ms,
+        policy_name=args.policy_name,
+        max_prefill_per_step=args.max_prefill_per_step,
+    )
